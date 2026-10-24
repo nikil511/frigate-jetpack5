@@ -52,18 +52,10 @@ RUN --mount=type=tmpfs,target=/tmp --mount=type=tmpfs,target=/var/cache/apt \
     --mount=type=cache,target=/root/.ccache \
     /deps/build_sqlite_vec.sh
 
-# Build intel-media-driver from source against bookworm's system libva so it
-# works with Debian 12's glibc/libstdc++ (pre-built noble/trixie packages
-# require glibc 2.38 which is not available on bookworm).
-FROM base AS intel-media-driver
-ARG DEBIAN_FRONTEND
-RUN --mount=type=bind,source=docker/main/build_intel_media_driver.sh,target=/deps/build_intel_media_driver.sh \
-    /deps/build_intel_media_driver.sh
-
 FROM scratch AS go2rtc
 ARG TARGETARCH
 WORKDIR /rootfs/usr/local/go2rtc/bin
-ADD --link --chmod=755 "https://github.com/AlexxIT/go2rtc/releases/download/v1.9.14/go2rtc_linux_${TARGETARCH}" go2rtc
+ADD --link --chmod=755 "https://github.com/AlexxIT/go2rtc/releases/download/v1.9.10/go2rtc_linux_${TARGETARCH}" go2rtc
 
 FROM wget AS tempio
 ARG TARGETARCH
@@ -81,10 +73,10 @@ RUN --mount=type=bind,source=docker/main/install_tempio.sh,target=/deps/install_
 FROM base_host AS ov-converter
 ARG DEBIAN_FRONTEND
 
-# Install OpenVINO for model conversion
+# Install OpenVino Runtime and Dev library
 COPY docker/main/requirements-ov.txt /requirements-ov.txt
 RUN apt-get -qq update \
-    && apt-get -qq install -y wget python3 python3-distutils \
+    && apt-get -qq install -y wget python3 python3-dev python3-distutils gcc pkg-config libhdf5-dev \
     && wget -q https://bootstrap.pypa.io/get-pip.py -O get-pip.py \
     && sed -i 's/args.append("setuptools")/args.append("setuptools==77.0.3")/' get-pip.py \
     && python3 get-pip.py "pip" \
@@ -158,20 +150,27 @@ ARG DEBIAN_FRONTEND
 ARG TARGETARCH
 ARG DEBUG=false
 
+# python 3.11 from python-build-standalone, deadsnakes has no arm64/focal binaries
+ADD https://github.com/astral-sh/python-build-standalone/releases/download/20260623/cpython-3.11.15+20260623-aarch64-unknown-linux-gnu-install_only.tar.gz /tmp/python311.tar.gz
+RUN echo "1de978b7039f345dacdddc3efb0726ce5b957bbbd34161037a4b426aabb18bf5  /tmp/python311.tar.gz" | sha256sum -c \
+    && tar -xzf /tmp/python311.tar.gz --strip-components=1 -C /usr/local \
+    && rm /tmp/python311.tar.gz
+
+# python-build-standalone records CC=clang in sysconfig
+ENV CC=gcc CXX=g++
+
 # Use a separate container to build wheels to prevent build dependencies in final image
 RUN apt-get -qq update \
     && apt-get -qq install -y \
     apt-transport-https wget unzip \
     && apt-get -qq update \
     && apt-get -qq install -y \
-    python3.11 \
-    python3.11-dev \
     # opencv dependencies
     build-essential cmake git pkg-config libgtk-3-dev \
     libavcodec-dev libavformat-dev libswscale-dev libv4l-dev \
     libxvidcore-dev libx264-dev libjpeg-dev libpng-dev libtiff-dev \
     gfortran openexr libatlas-base-dev libssl-dev\
-    libtbbmalloc2 libtbb-dev libdc1394-dev libopenexr-dev \
+    libtbb2 libtbb-dev libdc1394-22-dev libopenexr-dev \
     libgstreamer-plugins-base1.0-dev libgstreamer1.0-dev \
     # sqlite3 dependencies
     tclsh \
@@ -179,7 +178,7 @@ RUN apt-get -qq update \
     gcc gfortran libopenblas-dev liblapack-dev && \
     rm -rf /var/lib/apt/lists/*
 
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/local/bin/python3.11 1
 
 RUN wget -q https://bootstrap.pypa.io/get-pip.py -O get-pip.py \
     && sed -i 's/args.append("setuptools")/args.append("setuptools==77.0.3")/' get-pip.py \
@@ -208,7 +207,6 @@ RUN --mount=type=bind,source=docker/main/install_hailort.sh,target=/deps/install
 FROM scratch AS deps-rootfs
 COPY --from=nginx /usr/local/nginx/ /usr/local/nginx/
 COPY --from=sqlite-vec /usr/local/lib/ /usr/local/lib/
-COPY --from=intel-media-driver /rootfs/ /
 COPY --from=go2rtc /rootfs/ /
 COPY --from=libusb-build /usr/local/lib /usr/local/lib
 COPY --from=tempio /rootfs/ /
@@ -261,12 +259,18 @@ ENV GLOG_logtostderr=0
 
 ENV PATH="/usr/local/go2rtc/bin:/usr/local/tempio/bin:/usr/local/nginx/sbin:${PATH}"
 
+# python 3.11 from python-build-standalone, deadsnakes has no arm64/focal binaries
+ADD https://github.com/astral-sh/python-build-standalone/releases/download/20260623/cpython-3.11.15+20260623-aarch64-unknown-linux-gnu-install_only.tar.gz /tmp/python311.tar.gz
+RUN echo "1de978b7039f345dacdddc3efb0726ce5b957bbbd34161037a4b426aabb18bf5  /tmp/python311.tar.gz" | sha256sum -c \
+    && tar -xzf /tmp/python311.tar.gz --strip-components=1 -C /usr/local \
+    && rm /tmp/python311.tar.gz
+
 # Install dependencies
 RUN --mount=type=bind,source=docker/main/install_deps.sh,target=/deps/install_deps.sh \
     /deps/install_deps.sh
 
-ENV DEFAULT_FFMPEG_VERSION="8.0"
-ENV INCLUDED_FFMPEG_VERSIONS="${DEFAULT_FFMPEG_VERSION}:7.0:5.0"
+ENV DEFAULT_FFMPEG_VERSION="7.0"
+ENV INCLUDED_FFMPEG_VERSIONS="${DEFAULT_FFMPEG_VERSION}:5.0"
 
 RUN wget -q https://bootstrap.pypa.io/get-pip.py -O get-pip.py \
     && sed -i 's/args.append("setuptools")/args.append("setuptools==77.0.3")/' get-pip.py \
@@ -274,12 +278,6 @@ RUN wget -q https://bootstrap.pypa.io/get-pip.py -O get-pip.py \
 
 RUN --mount=type=bind,from=wheels,source=/wheels,target=/deps/wheels \
     pip3 install -U /deps/wheels/*.whl
-
-# Install Axera Engine
-RUN pip3 install https://github.com/AXERA-TECH/pyaxengine/releases/download/0.1.3-frigate/axengine-0.1.3-py3-none-any.whl
-
-ENV PATH="${PATH}:/usr/bin/axcl"
-ENV LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/lib/axcl"
 
 # Install MemryX runtime (requires libgomp (OpenMP) in the final docker image)
 RUN --mount=type=bind,source=docker/main/install_memryx.sh,target=/deps/install_memryx.sh \
